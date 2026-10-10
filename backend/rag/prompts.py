@@ -76,16 +76,23 @@ DO NOT duplicate or substantially repeat any of the following previously generat
 {excluded_list}
 """
 
-    return f"""You are an educational assessment expert.
-Generate exactly {number_of_questions} multiple-choice questions (MCQs) for the topic "{topic}" at "{difficulty}" difficulty level.
+    return f"""You are an experienced teacher writing a useful quiz from the student's course notes.
+Create exactly {number_of_questions} multiple-choice questions about "{topic}" at {difficulty} difficulty.
 
-CRITICAL INSTRUCTIONS:
-1. Every question MUST be grounded strictly in the provided course context below.
-2. Never invent facts or citations.
-3. Every question must have exactly 4 options.
-4. Exactly one option must be the correct answer (index 0, 1, 2, or 3).
-5. Provide a clear, source-grounded explanation for why the correct answer is right.
-6. The source object MUST include the exact page number (e.g. {{"page": 12}}) or slide number (e.g. {{"slide": 5}}) matching the provided chunk metadata.
+QUALITY RULES:
+1. Use only facts explicitly supported by COURSE CONTEXT. If it cannot support enough distinct questions, return fewer rather than inventing or repeating facts.
+2. Test understanding and application where the notes allow it. Vary the skill being tested; do not make every question a definition or reuse the same stem.
+3. Ask specific questions about a concept, relationship, cause, consequence, example, or distinction in the notes. Avoid filler such as "According to the course material, which statement is true?"
+4. Write four concise, plausible options from the same subject area. Distractors should reflect believable misunderstandings, not silly or unrelated choices. Keep options similar in length and style; they may be longer than six words when clarity requires it.
+5. Exactly one option must be correct. Do not make the correct option consistently longer or easier to spot. Distribute correct answer indexes; do not use a predictable pattern.
+6. Make each question clear, self-contained, unambiguous, and distinct from every other question and the excluded questions.
+7. Explain briefly why the answer is correct, using a fact from the notes. Never claim the notes say anything they do not say.
+8. Cite the exact filename and page or slide attached to the supporting chunk. Never guess a citation.
+
+DIFFICULTY:
+- easy: identify or explain a directly stated idea.
+- medium: connect ideas or apply a stated rule to a simple example.
+- hard: compare concepts or reason through a new situation using only stated rules.
 {excluded_text}
 === COURSE CONTEXT ===
 {context}

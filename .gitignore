@@ -33,3 +33,27 @@ frontend/dist-ssr/
 .idea/
 .DS_Store
 Thumbs.db
+.env.*
+!.env.example
+backend/.env.*
+!backend/.env.example
+
+# Test caches
+.pytest_cache/
+# Local database journal files
+backend/*.db-shm
+backend/*.db-wal
+
+# Local vector database and uploaded documents
+chroma_db/
+uploads/
+backend/chroma_db/
+backend/uploads/
+
+# Secrets
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example

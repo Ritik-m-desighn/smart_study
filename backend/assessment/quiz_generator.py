@@ -10,6 +10,56 @@ from backend.rag.prompts import build_quiz_prompt, format_rag_context
 
 logger = logging.getLogger(__name__)
 
+def _normalize_quiz_question(question: Any) -> Optional[Dict[str, Any]]:
+    """Return a clean, schema-valid question or reject malformed model output."""
+    if not isinstance(question, dict):
+        return None
+
+    question_text = question.get("question")
+    options = question.get("options")
+    correct_answer = question.get("correct_answer")
+    explanation = question.get("explanation")
+    source = question.get("source", {})
+    if (
+        not isinstance(question_text, str)
+        or not question_text.strip()
+        or not isinstance(options, list)
+        or len(options) != 4
+        or type(correct_answer) is not int
+        or not 0 <= correct_answer < 4
+        or not isinstance(explanation, str)
+        or not explanation.strip()
+        or not isinstance(source, dict)
+    ):
+        return None
+
+    clean_options = []
+    for option in options:
+        if not isinstance(option, str):
+            return None
+        clean_option = re.sub(r"\s+", " ", option).strip().strip("\"'")
+        clean_option = re.sub(r"^\s*(?:[A-Da-d]|\d+)[.)]\s*", "", clean_option)
+        clean_option = clean_option.rstrip(" .!?")
+        word_count = len(re.findall(r"\b[\w'-]+\b", clean_option))
+        if (
+            not clean_option
+            or word_count > 30
+            or re.search(r"\b(?:page|slide)\s*[:#]?\s*\d+\b|\[CHUNK\b", clean_option, re.IGNORECASE)
+        ):
+            return None
+        clean_options.append(clean_option)
+
+    if len({option.casefold() for option in clean_options}) != 4:
+        return None
+
+    return {
+        "question": question_text.strip(),
+        "options": clean_options,
+        "correct_answer": correct_answer,
+        "explanation": explanation.strip(),
+        "source": source
+    }
+
 def jaccard_similarity(text1: str, text2: str) -> float:
     """
     Computes token-level Jaccard similarity between two strings to detect duplicates.
@@ -99,14 +149,23 @@ class QuizGenerator:
         """
         # 1. Retrieve course context for topic
         relevant_chunks, is_in_scope = self.retriever.retrieve(topic)
-        if not relevant_chunks:
-            # Try searching with fallback top chunks or all available chunks
-            raw = self.retriever.vector_store.similarity_search(topic, top_k=6)
-            relevant_chunks = raw if raw else []
 
-        if not relevant_chunks:
-            raise ValueError(f"No course material found relevant to topic '{topic}'. Please upload study materials first.")
+        if not is_in_scope or not relevant_chunks:
+            raise ValueError(
+                f"I couldn't find course material relevant enough to '{topic}'. "
+                "Try a topic that appears in your uploaded notes, or upload material about this topic."
+            )
 
+        chunk_sizes = [
+            len(chunk.get("text", ""))
+            for chunk in relevant_chunks
+        ]
+        logger.info(
+            "Quiz retrieval for topic %r: %d chunks, character lengths %s",
+            topic,
+            len(relevant_chunks),
+            chunk_sizes
+        )
         context_str = format_rag_context(relevant_chunks)
         existing_questions = self._get_existing_questions(topic)
 
@@ -137,23 +196,30 @@ class QuizGenerator:
                 if response.text:
                     parsed = extract_json_from_text(response.text)
                     if parsed and "questions" in parsed and isinstance(parsed["questions"], list):
-                        # Filter duplicates using Python similarity
-                        for q in parsed["questions"]:
-                            q_text = q.get("question", "")
-                            if not is_duplicate_question(q_text, existing_questions):
-                                questions_data.append(q)
+                        for raw_question in parsed["questions"]:
+                            question = _normalize_quiz_question(raw_question)
+                            if question is None:
+                                logger.warning("Discarding malformed quiz question from Gemini output.")
+                                continue
+                            already_seen = existing_questions + [q["question"] for q in questions_data]
+                            if not is_duplicate_question(question["question"], already_seen):
+                                questions_data.append(question)
+                    else:
+                        logger.warning("Gemini returned quiz output without a valid questions array.")
             except Exception as e:
-                logger.error(f"Gemini Quiz Generation failed: {e}. Falling back to grounded generator.")
+                logger.error(f"Gemini quiz generation failed: {e}")
 
-        # 4. Fallback generator if Gemini was unavailable or returned insufficient questions
+        # Never fill a quiz with repetitive placeholder questions. A short quiz is
+        # better than showing students made-up, misleading, or low-quality items.
         if len(questions_data) < number_of_questions:
-            fallback_qs = self._generate_grounded_fallback(
-                topic, difficulty, number_of_questions - len(questions_data), relevant_chunks, existing_questions
+            if client is None:
+                reason = "Gemini is unavailable. Check GEMINI_API_KEY and the model configuration."
+            else:
+                reason = "Gemini did not return enough distinct, valid questions for these notes."
+            raise ValueError(
+                f"Couldn't create a reliable {number_of_questions}-question quiz on '{topic}'. "
+                f"{reason} Try a narrower topic or add more course material."
             )
-            questions_data.extend(fallback_qs)
-
-        # Truncate to exact number of questions
-        questions_data = questions_data[:number_of_questions]
 
         # 5. Persist quiz and questions to SQLite
         quiz_id = str(uuid.uuid4())
@@ -231,54 +297,6 @@ class QuizGenerator:
             "difficulty": difficulty,
             "questions": persisted_questions
         }
-
-    def _generate_grounded_fallback(
-        self,
-        topic: str,
-        difficulty: str,
-        count: int,
-        chunks: List[Dict[str, Any]],
-        existing_questions: List[str]
-    ) -> List[Dict[str, Any]]:
-        """
-        Creates well-formed, source-grounded MCQs directly from chunk text
-        for offline testing or when the model quota is reached.
-        """
-        fallback_qs = []
-        for i in range(count):
-            chunk = chunks[i % len(chunks)]
-            meta = chunk.get("metadata", {})
-            text = chunk.get("text", "")
-            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if len(s.strip()) > 20]
-            sentence = sentences[i % len(sentences)] if sentences else f"{topic} is an essential concept."
-
-            # Construct question
-            question_text = f"According to the course material on {topic}, which of the following statements is true?"
-            if is_duplicate_question(question_text, existing_questions):
-                question_text = f"Regarding {topic} (Concept #{len(existing_questions) + i + 1}), which statement is correct?"
-
-            correct_option = sentence
-            distractor1 = f"It is completely unrelated to {topic}."
-            distractor2 = f"It operates in the opposite manner described in the notes."
-            distractor3 = "None of the provided concepts apply."
-
-            src: Dict[str, Any] = {"filename": meta.get("filename", "Course Material")}
-            if "page" in meta:
-                src["page"] = meta["page"]
-            if "slide" in meta:
-                src["slide"] = meta["slide"]
-
-            fallback_qs.append({
-                "question": question_text,
-                "options": [correct_option, distractor1, distractor2, distractor3],
-                "correct_answer": 0,
-                "explanation": f"Grounded directly in {src.get('filename')}: '{sentence}'",
-                "source": src,
-                "topic": topic,
-                "difficulty": difficulty
-            })
-
-        return fallback_qs
 
 # Singleton instance
 _quiz_generator: QuizGenerator | None = None

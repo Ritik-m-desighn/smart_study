@@ -11,6 +11,7 @@ from backend.assessment.mastery import calculate_new_mastery, MasteryManager
 from backend.assessment.grader import QuizGrader
 from backend.assessment.quiz_generator import (
     QuizGenerator,
+    _normalize_quiz_question,
     is_duplicate_question,
     jaccard_similarity
 )
@@ -86,6 +87,42 @@ def test_3_chunk_generation(sample_pdf):
     assert chunk2["document_id"] == "doc_test_3"
     assert chunk2["metadata"]["page"] == 2
     assert "UDP" in chunk2["text"]
+
+def test_chunk_size_and_overlap_keep_chunks_bounded():
+    from backend.rag.chunker import DEFAULT_CHUNK_SIZE_CHARS, DEFAULT_OVERLAP_CHARS
+
+    text = " ".join(f"Sentence {i} describes a networking concept." for i in range(40))
+    chunks = split_text_into_chunks(text)
+
+    assert DEFAULT_CHUNK_SIZE_CHARS == 500
+    assert DEFAULT_OVERLAP_CHARS == 50
+    assert len(chunks) > 1
+    assert all(0 < len(chunk) <= DEFAULT_CHUNK_SIZE_CHARS for chunk in chunks)
+    assert any(set(chunk.split()) & set(chunks[index + 1].split()) for index, chunk in enumerate(chunks[:-1]))
+
+def test_chunk_size_splits_long_unbroken_text():
+    chunks = split_text_into_chunks("x" * 1200)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 500 for chunk in chunks)
+
+def test_quiz_question_options_must_be_concise_and_clean():
+    valid_question = {
+        "question": "Which protocol is connection-oriented?",
+        "options": ["A. TCP", "UDP", "File transfer", "Network layer"],
+        "correct_answer": 0,
+        "explanation": "TCP establishes a connection.",
+        "source": {"page": 1}
+    }
+    invalid_question = {
+        **valid_question,
+        "options": ["TCP is used for a reliable connection", "UDP", "File transfer", "Network layer"]
+    }
+
+    normalized = _normalize_quiz_question(valid_question)
+    assert normalized is not None
+    assert normalized["options"] == ["TCP", "UDP", "File transfer", "Network layer"]
+    assert _normalize_quiz_question(invalid_question) is None
 
 
 # 4. Vector search

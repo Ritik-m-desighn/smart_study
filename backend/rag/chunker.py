@@ -2,8 +2,8 @@ import re
 from typing import List, Dict, Any
 
 # Approximate 1 token ~= 4 characters in English
-DEFAULT_CHUNK_SIZE_CHARS = 2400   # ~600 tokens
-DEFAULT_OVERLAP_CHARS = 300       # ~75 tokens
+DEFAULT_CHUNK_SIZE_CHARS = 500
+DEFAULT_OVERLAP_CHARS = 50
 
 def split_text_into_chunks(
     text: str,
@@ -14,6 +14,11 @@ def split_text_into_chunks(
     Splits text semantically preferring paragraph boundaries, headings, and sentence ends.
     Uses sliding window with overlap.
     """
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero.")
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be between zero and chunk_size - 1.")
+
     text = text.strip()
     if not text:
         return []
@@ -21,69 +26,40 @@ def split_text_into_chunks(
     if len(text) <= chunk_size:
         return [text]
 
-    # Split by paragraphs first
-    paragraphs = text.split("\n\n")
     chunks: List[str] = []
-    current_chunk: List[str] = []
-    current_length = 0
+    start = 0
+    while start < len(text):
+        max_end = min(start + chunk_size, len(text))
+        end = max_end
 
-    for para in paragraphs:
-        para_clean = para.strip()
-        if not para_clean:
-            continue
+        if max_end < len(text):
+            region = text[start:max_end]
+            min_boundary = start + chunk_size // 2
+            semantic_matches = list(re.finditer(r"(?<=[.!?])\s+|\n{2,}", region))
+            whitespace_matches = list(re.finditer(r"\s+", region))
+            matches = semantic_matches or whitespace_matches
+            eligible = [
+                start + match.start()
+                for match in matches
+                if start + match.start() >= min_boundary
+            ]
+            if eligible:
+                end = eligible[-1]
 
-        # If a single paragraph is longer than chunk_size, split by sentences
-        if len(para_clean) > chunk_size:
-            # First flush what we have
-            if current_chunk:
-                chunks.append("\n\n".join(current_chunk))
-                current_chunk = []
-                current_length = 0
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end == len(text):
+            break
 
-            sentences = re.split(r"(?<=[.!?])\s+", para_clean)
-            sub_chunk: List[str] = []
-            sub_len = 0
-            for sent in sentences:
-                sent_clean = sent.strip()
-                if not sent_clean:
-                    continue
-                if sub_len + len(sent_clean) > chunk_size and sub_chunk:
-                    chunks.append(" ".join(sub_chunk))
-                    # Compute overlap from trailing sentences
-                    overlap_str = " ".join(sub_chunk)
-                    if len(overlap_str) > overlap:
-                        overlap_tail = overlap_str[-overlap:]
-                        sub_chunk = [overlap_tail, sent_clean]
-                        sub_len = len(overlap_tail) + len(sent_clean)
-                    else:
-                        sub_chunk = [sent_clean]
-                        sub_len = len(sent_clean)
-                else:
-                    sub_chunk.append(sent_clean)
-                    sub_len += len(sent_clean) + 1
-
-            if sub_chunk:
-                chunks.append(" ".join(sub_chunk))
-            continue
-
-        if current_length + len(para_clean) > chunk_size and current_chunk:
-            full_chunk_text = "\n\n".join(current_chunk)
-            chunks.append(full_chunk_text)
-
-            # Overlap: keep last part of previous chunk
-            if len(full_chunk_text) > overlap:
-                tail = full_chunk_text[-overlap:]
-                current_chunk = [tail, para_clean]
-                current_length = len(tail) + len(para_clean) + 2
-            else:
-                current_chunk = [para_clean]
-                current_length = len(para_clean)
-        else:
-            current_chunk.append(para_clean)
-            current_length += len(para_clean) + 2
-
-    if current_chunk:
-        chunks.append("\n\n".join(current_chunk))
+        next_start = max(start + 1, end - overlap)
+        if overlap:
+            whitespace = re.search(r"\s", text[next_start:end])
+            if whitespace:
+                next_start += whitespace.end()
+        while next_start < len(text) and text[next_start].isspace():
+            next_start += 1
+        start = max(next_start, end if next_start <= start else next_start)
 
     return chunks
 
